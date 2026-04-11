@@ -990,6 +990,78 @@ class TestTaskSpecificOverrides:
         assert model == "glm-4.7"
         assert mock_openai.call_args.kwargs["base_url"] == "https://api.z.ai/api/coding/paas/v4"
 
+    def test_compression_context_length_from_auxiliary_config(self, monkeypatch, tmp_path):
+        """auxiliary.compression.context_length should be returned as 6th element."""
+        from agent.auxiliary_client import _resolve_task_provider_model
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            """auxiliary:
+  compression:
+    base_url: http://localhost:4134/v1
+    model: qwen-model
+    context_length: 196608
+"""
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        result = _resolve_task_provider_model("compression")
+        assert len(result) == 6
+        provider, model, base_url, api_key, api_mode, context_length = result
+        assert context_length == 196608
+
+    def test_compression_context_length_from_legacy_compression_section(self, monkeypatch, tmp_path):
+        """compression.context_length (legacy) should be returned as 6th element."""
+        from agent.auxiliary_client import _resolve_task_provider_model
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            """compression:
+  summary_base_url: http://localhost:4134/v1
+  summary_model: qwen-model
+  context_length: 131072
+"""
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        result = _resolve_task_provider_model("compression")
+        assert len(result) == 6
+        context_length = result[5]
+        assert context_length == 131072
+
+    def test_auxiliary_context_length_overrides_legacy_compression(self, monkeypatch, tmp_path):
+        """auxiliary.compression.context_length takes priority over compression.context_length."""
+        from agent.auxiliary_client import _resolve_task_provider_model
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            """auxiliary:
+  compression:
+    model: qwen-model
+    context_length: 196608
+compression:
+  context_length: 8192
+"""
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        result = _resolve_task_provider_model("compression")
+        context_length = result[5]
+        assert context_length == 196608  # auxiliary wins over legacy
+
+    def test_no_context_length_returns_none(self, monkeypatch, tmp_path):
+        """When no context_length is configured, the 6th element should be None."""
+        from agent.auxiliary_client import _resolve_task_provider_model
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            """auxiliary:
+  compression:
+    model: some-model
+"""
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        result = _resolve_task_provider_model("compression")
+        context_length = result[5]
+        assert context_length is None
+
 
 class TestAuxiliaryMaxTokensParam:
     def test_codex_fallback_uses_max_tokens(self, monkeypatch):
@@ -1138,7 +1210,7 @@ class TestCallLlmPaymentFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "google/gemini-3-flash-preview")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None)), \
+                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None, None)), \
              patch("agent.auxiliary_client._try_payment_fallback",
                     return_value=(fallback_client, "gpt-5.2-codex", "openai-codex")) as mock_fb:
             result = call_llm(
@@ -1162,7 +1234,7 @@ class TestCallLlmPaymentFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "local-model")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("custom", "local-model", None, None, None)), \
+                    return_value=("custom", "local-model", None, None, None, None)), \
              patch("agent.auxiliary_client._try_payment_fallback") as mock_fb:
             with pytest.raises(Exception, match="insufficient credits"):
                 call_llm(
@@ -1189,7 +1261,7 @@ class TestCallLlmPaymentFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "model")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("auto", "model", None, None, None)), \
+                    return_value=("auto", "model", None, None, None, None)), \
              patch("agent.auxiliary_client._is_connection_error", return_value=True), \
              patch("agent.auxiliary_client._try_payment_fallback",
                     return_value=(fallback_client, "fb-model", "nous")) as mock_fb:
@@ -1213,7 +1285,7 @@ class TestCallLlmPaymentFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "google/gemini-3-flash-preview")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None)):
+                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None, None)):
             with pytest.raises(Exception, match="Internal Server Error"):
                 call_llm(
                     task="compression",
@@ -1230,7 +1302,7 @@ class TestCallLlmPaymentFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "google/gemini-3-flash-preview")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None)), \
+                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None, None)), \
              patch("agent.auxiliary_client._try_payment_fallback",
                     return_value=(None, None, "")):
             with pytest.raises(Exception, match="insufficient credits"):
@@ -1407,7 +1479,7 @@ class TestAsyncCallLlmFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "google/gemini-3-flash-preview")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None)), \
+                    return_value=("auto", "google/gemini-3-flash-preview", None, None, None, None)), \
              patch("agent.auxiliary_client._try_payment_fallback",
                     return_value=(fb_sync_client, "gpt-5.2-codex", "openai-codex")) as mock_fb, \
              patch("agent.auxiliary_client._to_async_client",
@@ -1432,7 +1504,7 @@ class TestAsyncCallLlmFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "local-model")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("custom", "local-model", None, None, None)), \
+                    return_value=("custom", "local-model", None, None, None, None)), \
              patch("agent.auxiliary_client._try_payment_fallback") as mock_fb:
             with pytest.raises(Exception, match="insufficient credits"):
                 await async_call_llm(
@@ -1460,7 +1532,7 @@ class TestAsyncCallLlmFallback:
         with patch("agent.auxiliary_client._get_cached_client",
                     return_value=(primary_client, "model")), \
              patch("agent.auxiliary_client._resolve_task_provider_model",
-                    return_value=("auto", "model", None, None, None)), \
+                    return_value=("auto", "model", None, None, None, None)), \
              patch("agent.auxiliary_client._is_connection_error", return_value=True), \
              patch("agent.auxiliary_client._try_payment_fallback",
                     return_value=(fb_sync_client, "fb-model", "nous")) as mock_fb, \

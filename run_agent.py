@@ -1270,7 +1270,18 @@ class AIAgent:
                                         _config_context_length = int(_cp_ctx)
                                     except (TypeError, ValueError):
                                         pass
+                        # Fall back to top-level context_length on the entry
+                        if _config_context_length is None:
+                            _cp_ctx = _cp_entry.get("context_length")
+                            if _cp_ctx is not None:
+                                try:
+                                    _config_context_length = int(_cp_ctx)
+                                except (TypeError, ValueError):
+                                    pass
                         break
+        # Sync self._config_context_length if a custom provider value was found
+        if _config_context_length is not None and self._config_context_length is None:
+            self._config_context_length = _config_context_length
         
         # Select context engine: config-driven (like memory providers).
         # 1. Check config.yaml context.engine setting
@@ -1720,9 +1731,10 @@ class AIAgent:
         if not self.compression_enabled:
             return
         try:
-            from agent.auxiliary_client import get_text_auxiliary_client
+            from agent.auxiliary_client import get_text_auxiliary_client, _resolve_task_provider_model
             from agent.model_metadata import get_model_context_length
 
+            _, _, _, _, _, _aux_cfg_ctx_len = _resolve_task_provider_model("compression")
             client, aux_model = get_text_auxiliary_client("compression")
             if client is None or not aux_model:
                 msg = (
@@ -1744,6 +1756,7 @@ class AIAgent:
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
+                config_context_length=_aux_cfg_ctx_len,
             )
 
             threshold = self.context_compressor.threshold_tokens

@@ -277,3 +277,98 @@ def test_run_conversation_clears_warning_after_replay(mock_get_client, mock_ctx_
         agent._compression_warning = None
 
     assert len(callback_events) == 0
+
+
+# ── auxiliary.compression.context_length wiring ─────────────────────
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_aux_compression_context_length_suppresses_warning(mock_get_client):
+    """When auxiliary.compression.context_length is set and large enough,
+    it should be passed to get_model_context_length so no warning is emitted."""
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    # threshold = 100_000
+    mock_client = MagicMock()
+    mock_client.base_url = "http://localhost:4134/v1"
+    mock_client.api_key = ""
+    mock_get_client.return_value = (mock_client, "qwen-model")
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    # Simulate config with auxiliary.compression.context_length = 196_608 (> threshold)
+    with patch(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        return_value=("custom", "qwen-model", "http://localhost:4134/v1", "", None, 196_608),
+    ), patch(
+        "agent.model_metadata.get_model_context_length",
+        return_value=196_608,
+    ) as mock_ctx_len:
+        agent._check_compression_model_feasibility()
+
+        # get_model_context_length should be called with config_context_length=196_608
+        call_kwargs = mock_ctx_len.call_args.kwargs
+        assert call_kwargs.get("config_context_length") == 196_608
+
+    # No warning since 196_608 >= threshold of 100_000
+    assert len(messages) == 0
+    assert agent._compression_warning is None
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_aux_compression_context_length_still_warns_when_too_small(mock_get_client):
+    """When auxiliary.compression.context_length is set but smaller than threshold,
+    the warning should still be emitted."""
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    # threshold = 100_000
+    mock_client = MagicMock()
+    mock_client.base_url = "http://localhost:4134/v1"
+    mock_client.api_key = ""
+    mock_get_client.return_value = (mock_client, "small-model")
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    # Simulate config with auxiliary.compression.context_length = 32_768 (< threshold)
+    with patch(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        return_value=("custom", "small-model", "http://localhost:4134/v1", "", None, 32_768),
+    ), patch(
+        "agent.model_metadata.get_model_context_length",
+        return_value=32_768,
+    ) as mock_ctx_len:
+        agent._check_compression_model_feasibility()
+
+        call_kwargs = mock_ctx_len.call_args.kwargs
+        assert call_kwargs.get("config_context_length") == 32_768
+
+    assert len(messages) == 1
+    assert "32,768" in messages[0]
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_aux_compression_no_context_length_passes_none(mock_get_client):
+    """When no auxiliary.compression.context_length is configured,
+    config_context_length=None should be passed (auto-detect)."""
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "auto-model")
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    with patch(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        return_value=("auto", "auto-model", None, None, None, None),
+    ), patch(
+        "agent.model_metadata.get_model_context_length",
+        return_value=200_000,
+    ) as mock_ctx_len:
+        agent._check_compression_model_feasibility()
+
+        call_kwargs = mock_ctx_len.call_args.kwargs
+        assert call_kwargs.get("config_context_length") is None
+
+    assert len(messages) == 0

@@ -1214,3 +1214,113 @@ def test_openrouter_provider_not_affected_by_custom_fix(monkeypatch):
 
     resolved = rp.resolve_runtime_provider(requested="openrouter")
     assert resolved["provider"] == "openrouter"
+
+
+# ── custom_providers context_length wiring ─────────────────────────────
+
+
+def test_named_custom_provider_toplevel_context_length(monkeypatch):
+    """Top-level context_length on a custom_providers entry should be included
+    in the resolved runtime dict."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-llm")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-llm",
+            "base_url": "http://localhost:4134/v1",
+            "api_key": "",
+            "context_length": 196608,
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-llm")
+
+    assert resolved["context_length"] == 196608
+    assert resolved["base_url"] == "http://localhost:4134/v1"
+
+
+def test_named_custom_provider_no_context_length_absent_from_result(monkeypatch):
+    """When no context_length is set, the key should not appear in the result."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-llm")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-llm",
+            "base_url": "http://localhost:8000/v1",
+            "api_key": "sk-test",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-llm")
+
+    assert "context_length" not in resolved
+
+
+def test_get_named_custom_provider_reads_toplevel_context_length(monkeypatch, tmp_path):
+    """_get_named_custom_provider should include top-level context_length in result."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """model:
+  default: my-model
+  provider: my-llm
+custom_providers:
+  - name: my-llm
+    base_url: http://localhost:4134/v1
+    context_length: 196608
+"""
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        rp, "load_config",
+        lambda: {
+            "model": {"default": "my-model", "provider": "my-llm"},
+            "custom_providers": [
+                {
+                    "name": "my-llm",
+                    "base_url": "http://localhost:4134/v1",
+                    "context_length": 196608,
+                }
+            ],
+        },
+    )
+    # Bypass built-in provider check
+    from hermes_cli.auth import AuthError as _AuthError
+    monkeypatch.setattr(
+        rp.auth_mod, "resolve_provider",
+        lambda p: (_ for _ in ()).throw(_AuthError("not a built-in", provider=p)),
+    )
+
+    result = rp._get_named_custom_provider("my-llm")
+
+    assert result is not None
+    assert result["context_length"] == 196608
+
+
+def test_get_named_custom_provider_reads_per_model_context_length(monkeypatch):
+    """_get_named_custom_provider should prefer per-model context_length over top-level."""
+    monkeypatch.setattr(
+        rp, "load_config",
+        lambda: {
+            "model": {"default": "qwen-model", "provider": "my-llm"},
+            "custom_providers": [
+                {
+                    "name": "my-llm",
+                    "base_url": "http://localhost:4134/v1",
+                    "context_length": 8192,  # top-level fallback
+                    "models": {
+                        "qwen-model": {"context_length": 196608},
+                    },
+                }
+            ],
+        },
+    )
+    from hermes_cli.auth import AuthError as _AuthError
+    monkeypatch.setattr(
+        rp.auth_mod, "resolve_provider",
+        lambda p: (_ for _ in ()).throw(_AuthError("not a built-in", provider=p)),
+    )
+
+    result = rp._get_named_custom_provider("my-llm")
+
+    assert result is not None
+    assert result["context_length"] == 196608  # per-model wins over top-level

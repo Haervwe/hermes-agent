@@ -1553,7 +1553,7 @@ def get_text_auxiliary_client(task: str = "") -> Tuple[Optional[OpenAI], Optiona
     Callers may override the returned model with a per-task env var
     (e.g. CONTEXT_COMPRESSION_MODEL, AUXILIARY_WEB_EXTRACT_MODEL).
     """
-    provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
+    provider, model, base_url, api_key, api_mode, _ = _resolve_task_provider_model(task or None)
     return resolve_provider_client(
         provider,
         model=model,
@@ -1570,7 +1570,7 @@ def get_async_text_auxiliary_client(task: str = ""):
     (AsyncCodexAuxiliaryClient, model) which wraps the Responses API.
     Returns (None, None) when no provider is available.
     """
-    provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
+    provider, model, base_url, api_key, api_mode, _ = _resolve_task_provider_model(task or None)
     return resolve_provider_client(
         provider,
         model=model,
@@ -1650,7 +1650,7 @@ def resolve_vision_provider_client(
     backends, so users can intentionally force experimental providers. Auto mode
     stays conservative and only tries vision backends known to work today.
     """
-    requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+    requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode, _ = _resolve_task_provider_model(
         "vision", provider, model, base_url, api_key
     )
     requested = _normalize_vision_provider(requested)
@@ -1959,7 +1959,7 @@ def _resolve_task_provider_model(
     model: str = None,
     base_url: str = None,
     api_key: str = None,
-) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str]]:
+) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[int]]:
     """Determine provider + model for a call.
 
     Priority:
@@ -1968,10 +1968,11 @@ def _resolve_task_provider_model(
       3. Env var overrides (backward-compat: AUXILIARY_{TASK}_*, CONTEXT_{TASK}_*)
       4. "auto" (full auto-detection chain)
 
-    Returns (provider, model, base_url, api_key, api_mode) where model may
-    be None (use provider default). When base_url is set, provider is forced
-    to "custom" and the task uses that direct endpoint. api_mode is one of
-    "chat_completions", "codex_responses", or None (auto-detect).
+    Returns (provider, model, base_url, api_key, api_mode, context_length) where
+    model may be None (use provider default). When base_url is set, provider is
+    forced to "custom" and the task uses that direct endpoint. api_mode is one of
+    "chat_completions", "codex_responses", or None (auto-detect). context_length
+    is the configured context window size override, or None if not set.
     """
     config = {}
     cfg_provider = None
@@ -1979,6 +1980,7 @@ def _resolve_task_provider_model(
     cfg_base_url = None
     cfg_api_key = None
     cfg_api_mode = None
+    cfg_context_length: Optional[int] = None
 
     if task:
         try:
@@ -1996,6 +1998,12 @@ def _resolve_task_provider_model(
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
+        _raw_ctx = task_config.get("context_length")
+        if _raw_ctx is not None:
+            try:
+                cfg_context_length = int(_raw_ctx)
+            except (TypeError, ValueError):
+                pass
 
         # Backwards compat: compression section has its own keys.
         # The auxiliary.compression defaults to provider="auto", so treat
@@ -2007,6 +2015,14 @@ def _resolve_task_provider_model(
                 cfg_model = cfg_model or comp.get("summary_model", "").strip() or None
                 _sbu = comp.get("summary_base_url") or ""
                 cfg_base_url = cfg_base_url or _sbu.strip() or None
+                # Also read context_length from legacy compression section as fallback
+                if cfg_context_length is None:
+                    _raw_comp_ctx = comp.get("context_length")
+                    if _raw_comp_ctx is not None:
+                        try:
+                            cfg_context_length = int(_raw_comp_ctx)
+                        except (TypeError, ValueError):
+                            pass
 
     # Env vars are backward-compat fallback only — config.yaml is primary.
     env_model = _get_auxiliary_env_override(task, "MODEL") if task else None
@@ -2015,31 +2031,31 @@ def _resolve_task_provider_model(
     resolved_api_mode = cfg_api_mode or env_api_mode
 
     if base_url:
-        return "custom", resolved_model, base_url, api_key, resolved_api_mode
+        return "custom", resolved_model, base_url, api_key, resolved_api_mode, cfg_context_length
     if provider:
-        return provider, resolved_model, base_url, api_key, resolved_api_mode
+        return provider, resolved_model, base_url, api_key, resolved_api_mode, cfg_context_length
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
         if cfg_base_url:
-            return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
+            return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode, cfg_context_length
         if cfg_provider and cfg_provider != "auto":
-            return cfg_provider, resolved_model, None, None, resolved_api_mode
+            return cfg_provider, resolved_model, None, None, resolved_api_mode, cfg_context_length
 
         # Env vars are backward-compat fallback for users who haven't
         # migrated to config.yaml yet.
         env_base_url = _get_auxiliary_env_override(task, "BASE_URL")
         env_api_key = _get_auxiliary_env_override(task, "API_KEY")
         if env_base_url:
-            return "custom", resolved_model, env_base_url, env_api_key, resolved_api_mode
+            return "custom", resolved_model, env_base_url, env_api_key, resolved_api_mode, cfg_context_length
 
         env_provider = _get_auxiliary_provider(task)
         if env_provider != "auto":
-            return env_provider, resolved_model, None, None, resolved_api_mode
+            return env_provider, resolved_model, None, None, resolved_api_mode, cfg_context_length
 
-        return "auto", resolved_model, None, None, resolved_api_mode
+        return "auto", resolved_model, None, None, resolved_api_mode, cfg_context_length
 
-    return "auto", resolved_model, None, None, resolved_api_mode
+    return "auto", resolved_model, None, None, resolved_api_mode, cfg_context_length
 
 
 _DEFAULT_AUX_TIMEOUT = 30.0
@@ -2180,7 +2196,7 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode, _ = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
 
     if task == "vision":
@@ -2382,7 +2398,7 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode, _ = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
 
     if task == "vision":

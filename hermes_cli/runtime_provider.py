@@ -304,6 +304,37 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         api_mode = _parse_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
+
+        # Resolve context_length: per-model takes priority over top-level entry value.
+        # Read the active model from the model config to look up per-model context_length.
+        _ctx_len = None
+        _model_cfg = config.get("model") if isinstance(config, dict) else None
+        _active_model = ""
+        if isinstance(_model_cfg, dict):
+            _active_model = str(_model_cfg.get("default", "") or "").strip()
+        elif isinstance(_model_cfg, str):
+            _active_model = _model_cfg.strip()
+        if _active_model:
+            _cp_models = entry.get("models", {})
+            if isinstance(_cp_models, dict):
+                _cp_model_cfg = _cp_models.get(_active_model, {})
+                if isinstance(_cp_model_cfg, dict):
+                    _raw = _cp_model_cfg.get("context_length")
+                    if _raw is not None:
+                        try:
+                            _ctx_len = int(_raw)
+                        except (TypeError, ValueError):
+                            pass
+        if _ctx_len is None:
+            _raw = entry.get("context_length")
+            if _raw is not None:
+                try:
+                    _ctx_len = int(_raw)
+                except (TypeError, ValueError):
+                    pass
+        if _ctx_len is not None:
+            result["context_length"] = _ctx_len
+
         return result
 
     return None
@@ -347,6 +378,8 @@ def _resolve_named_custom_runtime(
         "base_url": base_url,
         "api_key": api_key or "no-key-required",
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
+        **({} if custom_provider.get("context_length") is None
+           else {"context_length": custom_provider["context_length"]}),
     }
 
 
